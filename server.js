@@ -22,7 +22,7 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "")
 const MAX_ROOM_SIZE = parseInt(process.env.MAX_ROOM_SIZE || "50", 10);
 const MAX_MESSAGE_BYTES = 8 * 1024;
 const HEARTBEAT_MS = 30_000;
-const EMPTY_ROOM_TTL_MS = 60_000; // delete empty room after this
+const EMPTY_ROOM_TTL_MS = 10 * 60_000; // end the room after everyone has been offline this long
 const VOICE_SIGNAL_MAX = 6000;
 const VOICE_GRACE_MS = 10_000; // keep a disconnected member in the voice call this long
 const HOST_GRACE_MS = 15_000; // wait before migrating host after disconnect
@@ -162,6 +162,19 @@ function cleanSettings(v) {
   };
 }
 
+function cleanBrowse(v) {
+  if (!v || typeof v !== "object") return null;
+  return {
+    screen: cleanString(v.screen, 24),
+    animeId: cleanNumber(v.animeId, 0, 1e9, 0),
+    title: cleanString(v.title, 120),
+    subtitle: cleanString(v.subtitle, 160),
+    poster: cleanString(v.poster, 400),
+    banner: cleanString(v.banner, 400),
+    query: cleanString(v.query, 80),
+  };
+}
+
 function cleanVideo(v) {
   if (!v || typeof v !== "object") return null;
   const url = cleanString(v.url, 2048);
@@ -186,6 +199,7 @@ function createRoom(host) {
     hostId: host.userId,
     members: new Map([[host.userId, host]]),
     video: null,
+    browse: null,
     settings: cleanSettings(null),
     playback: { playing: false, position: 0, rate: 1, updatedAt: now() },
     cleanupTimer: null,
@@ -294,12 +308,13 @@ function joinedPayload(room, member) {
     hostId: room.hostId,
     members: memberList(room),
     voice: voiceList(room),
+    browse: room.browse,
     state: playbackSnapshot(room),
   };
 }
 
 // ---------------------------------------------------------- msg handlers ---
-const HOST_ONLY = new Set(["play", "pause", "seek", "rate", "change_video", "host_settings", "transfer_host", "kick"]);
+const HOST_ONLY = new Set(["play", "pause", "seek", "rate", "change_video", "host_settings", "transfer_host", "kick", "browse"]);
 
 function handleMessage(ws, msg) {
   const type = msg && msg.type;
@@ -405,6 +420,10 @@ function handleMessage(ws, msg) {
         ...playbackSnapshot(room, member.userId),
         action: "change_video",
       });
+    }
+    case "browse": {
+      room.browse = cleanBrowse(msg.browse);
+      return broadcast(room, "browse", { browse: room.browse }, member.userId);
     }
     case "host_settings": {
       room.settings = cleanSettings(msg.settings);
