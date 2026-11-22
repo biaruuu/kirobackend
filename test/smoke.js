@@ -92,6 +92,29 @@ function client() {
   assert.strictEqual(lj.state.position, 101);
   assert.strictEqual(lj.state.settings.provider, "Anivault");
 
+  // voice: join, state for everyone, relay of set-up notes, mute, speaking, leave
+  guest.send({ type: "voice_join", muted: false });
+  late.send({ type: "voice_join", muted: true });
+  let vs = await host.next("voice_state");
+  while (vs.members.length < 2) vs = await host.next("voice_state");
+  assert.deepStrictEqual(vs.members.map((m) => m.userId).sort(), ["g1", "l1"]);
+  guest.send({ type: "voice_signal", to: "l1", data: { type: "offer", sdp: "v=0" } });
+  const sig = await late.next("voice_signal");
+  assert.strictEqual(sig.from, "g1");
+  assert.strictEqual(sig.data.type, "offer");
+  host.send({ type: "voice_signal", to: "l1", data: { type: "offer", sdp: "x" } }); // host is not in the call: dropped
+  guest.send({ type: "speaking", on: true });
+  const sp = await late.next("speaking");
+  assert.strictEqual(sp.userId, "g1");
+  assert.strictEqual(sp.on, true);
+  late.send({ type: "voice_mute", muted: false, deafened: true });
+  let vs2 = await guest.next("voice_state");
+  while (!vs2.members.find((m) => m.userId === "l1" && m.deafened)) vs2 = await guest.next("voice_state");
+  late.send({ type: "voice_leave" });
+  let vs3 = await guest.next("voice_state");
+  while (vs3.members.length !== 1) vs3 = await guest.next("voice_state");
+  assert.strictEqual(vs3.members[0].userId, "g1");
+
   // bad room
   const bad = client();
   await bad.opened;

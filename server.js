@@ -23,6 +23,8 @@ const MAX_ROOM_SIZE = parseInt(process.env.MAX_ROOM_SIZE || "50", 10);
 const MAX_MESSAGE_BYTES = 8 * 1024;
 const HEARTBEAT_MS = 30_000;
 const EMPTY_ROOM_TTL_MS = 60_000; // delete empty room after this
+const VOICE_SIGNAL_MAX = 6000;
+const VOICE_GRACE_MS = 10_000; // keep a disconnected member in the voice call this long
 const HOST_GRACE_MS = 15_000; // wait before migrating host after disconnect
 const RATE_LIMIT_PER_SEC = 20;
 const CHAT_MAX_LEN = 500;
@@ -89,6 +91,27 @@ function memberList(room) {
     isHost: m.userId === room.hostId,
     online: !!m.ws,
   }));
+}
+
+/** Who is in the voice call and whether they are muted / deafened (speaking is relayed, not stored). */
+function voiceList(room) {
+  return [...room.members.values()]
+    .filter((m) => m.voice)
+    .map((m) => ({ userId: m.userId, muted: m.voice.muted, deafened: m.voice.deafened }));
+}
+
+function broadcastVoice(room) {
+  broadcast(room, "voice_state", { members: voiceList(room) });
+}
+
+function leaveVoice(room, member) {
+  if (member.voiceTimer) {
+    clearTimeout(member.voiceTimer);
+    member.voiceTimer = null;
+  }
+  if (!member.voice) return;
+  member.voice = null;
+  broadcastVoice(room);
 }
 
 // --------------------------------------------------------------- helpers ---
@@ -201,7 +224,11 @@ function migrateHost(room) {
 function removeMember(room, userId, { reason } = {}) {
   const m = room.members.get(userId);
   if (!m) return;
+  const hadVoice = !!m.voice;
+  if (m.voiceTimer) clearTimeout(m.voiceTimer);
+  m.voice = null;
   room.members.delete(userId);
+  if (hadVoice) broadcastVoice(room);
   if (m.ws) {
     m.ws.roomId = null;
     if (reason) send(m.ws, reason, {});
@@ -220,6 +247,14 @@ function handleDisconnect(ws) {
   m.ws = null;
   m.disconnectedAt = now();
   broadcast(room, "member_offline", { userId: m.userId, name: m.name, members: memberList(room) });
+  if (m.voice) {
+    // keep the voice slot for a few seconds so a network blip does not drop the call for everyone
+    if (m.voiceTimer) clearTimeout(m.voiceTimer);
+    m.voiceTimer = setTimeout(() => {
+      m.voiceTimer = null;
+      if (!m.ws) leaveVoice(room, m);
+    }, VOICE_GRACE_MS);
+  }
 
   if (room.hostId === m.userId) {
     // give the host a short window to reconnect before handing over control
@@ -236,6 +271,10 @@ function handleDisconnect(ws) {
 function attachMember(ws, room, member) {
   member.ws = ws;
   member.disconnectedAt = null;
+  if (member.voiceTimer) {
+    clearTimeout(member.voiceTimer);
+    member.voiceTimer = null;
+  }
   ws.roomId = room.id;
   ws.userId = member.userId;
   if (room.hostTimer && room.hostId === member.userId) {
@@ -254,6 +293,7 @@ function joinedPayload(room, member) {
     you: { userId: member.userId, name: member.name, isHost: room.hostId === member.userId },
     hostId: room.hostId,
     members: memberList(room),
+    voice: voiceList(room),
     state: playbackSnapshot(room),
   };
 }
@@ -407,6 +447,37 @@ function handleMessage(ws, msg) {
         ts: now(),
       });
     }
+    // ---- voice call (audio itself goes phone to phone; the server only relays the set-up notes and who is in the call)
+    case "voice_join": {
+      member.voice = { muted: msg.muted === true, deafened: msg.deafened === true };
+      return broadcastVoice(room);
+    }
+    case "voice_leave": {
+      return leaveVoice(room, member);
+    }
+    case "voice_mute": {
+      if (!member.voice) return;
+      member.voice.muted = msg.muted === true;
+      member.voice.deafened = msg.deafened === true;
+      return broadcastVoice(room);
+    }
+    case "voice_signal": {
+      if (!member.voice) return;
+      const target = room.members.get(cleanString(msg.to, 64));
+      if (!target || !target.voice || !target.ws) return;
+      const data = msg.data && typeof msg.data === "object" && !Array.isArray(msg.data) ? msg.data : null;
+      if (!data) return;
+      let text = "";
+      try {
+        text = JSON.stringify(data);
+      } catch (_) {}
+      if (!text || text.length > VOICE_SIGNAL_MAX) return;
+      return send(target.ws, "voice_signal", { from: member.userId, data });
+    }
+    case "speaking": {
+      if (!member.voice) return;
+      return broadcast(room, "speaking", { userId: member.userId, on: msg.on === true }, member.userId);
+    }
     case "transfer_host": {
       const target = room.members.get(cleanString(msg.userId, 64));
       if (!target || !target.ws) return sendError(ws, "bad_target", "member not found or offline");
@@ -512,19 +583,21 @@ wss.on("connection", (ws) => {
   ws.on("message", (raw, isBinary) => {
     if (isBinary) return sendError(ws, "bad_message", "binary not supported");
 
-    // simple token bucket rate limit
-    const t = now();
-    ws.tokens = Math.min(RATE_LIMIT_PER_SEC, ws.tokens + ((t - ws.lastRefill) / 1000) * RATE_LIMIT_PER_SEC);
-    ws.lastRefill = t;
-    if (ws.tokens < 1) return sendError(ws, "rate_limited", "slow down");
-    ws.tokens -= 1;
-
     let msg;
     try {
       msg = JSON.parse(raw.toString());
     } catch (_) {
       return sendError(ws, "bad_json", "invalid JSON");
     }
+
+    // simple token bucket rate limit (voice set-up notes come in bursts, so they cost less)
+    const t = now();
+    ws.tokens = Math.min(RATE_LIMIT_PER_SEC, ws.tokens + ((t - ws.lastRefill) / 1000) * RATE_LIMIT_PER_SEC);
+    ws.lastRefill = t;
+    const type = msg && msg.type;
+    const cost = type === "voice_signal" ? 0.2 : type === "speaking" ? 0.5 : 1;
+    if (ws.tokens < cost) return sendError(ws, "rate_limited", "slow down");
+    ws.tokens -= cost;
     try {
       handleMessage(ws, msg);
     } catch (err) {
