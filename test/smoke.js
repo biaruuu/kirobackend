@@ -64,6 +64,16 @@ function client() {
   assert.strictEqual(paused.playing, false);
   assert.strictEqual(paused.position, 101);
 
+  // host settings (source, subtitle, speed, fullscreen) reach guests and late joiners
+  host.send({ type: "host_settings", settings: { provider: "Anivault", audio: "English", sub: "en", fullscreen: true, speed: 1.5 } });
+  const st = await guest.next("state");
+  assert.strictEqual(st.action, "settings");
+  assert.strictEqual(st.settings.provider, "Anivault");
+  assert.strictEqual(st.settings.fullscreen, true);
+  assert.strictEqual(st.settings.speed, 1.5);
+  guest.send({ type: "host_settings", settings: { provider: "Hacked" } });
+  assert.strictEqual((await guest.next("error")).code, "not_host");
+
   // guest cannot control playback
   guest.send({ type: "play", time: 0 });
   assert.strictEqual((await guest.next("error")).code, "not_host");
@@ -78,6 +88,7 @@ function client() {
   late.send({ type: "join_room", roomId, name: "Late", userId: "l1" });
   const lj = await late.next("joined");
   assert.strictEqual(lj.state.position, 101);
+  assert.strictEqual(lj.state.settings.provider, "Anivault");
 
   // bad room
   const bad = client();

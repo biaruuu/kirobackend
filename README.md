@@ -43,12 +43,13 @@ Free Render plan natutulog kapag walang traffic, kaya may delay sa unang connect
 | `play` / `pause` / `seek` | `time` (seconds) | host |
 | `rate` | `rate` (0.25 - 4) | host |
 | `change_video` | `video{url,title,episode}`, `time?`, `autoplay?` | host |
+| `host_settings` | `settings{provider,audio,sub,fullscreen,speed}` (kini-copy ng guests) | host |
 | `host_heartbeat` | `time`, `playing` (ipadala every ~5s para walang drift) | host |
 | `transfer_host` / `kick` | `userId` | host |
 
 **Server > Client**: `connected`, `room_created`, `joined`, `state`, `member_joined`, `member_left`, `member_online`, `member_offline`, `host_changed`, `chat`, `buffering`, `kicked`, `replaced`, `left`, `pong`, `error{code,message}`
 
-`state` = `{ playing, position, rate, video, action, by, serverTime }`. Ang `position` ay computed na ng server sa oras na ipinadala. Para sa latency, i-apply ng client: `position + (Date.now() - serverTime)/1000 * rate` kung `playing` (gamitin ang offset mula sa `connected.serverTime` / `pong.serverTime` kung hindi sync ang clock).
+`state` = `{ playing, position, rate, video, settings, action, by, serverTime }`. Ang `position` ay computed na ng server sa oras na ipinadala. Para sa latency, i-apply ng client: `position + (Date.now() - serverTime)/1000 * rate` kung `playing` (gamitin ang offset mula sa `connected.serverTime` / `pong.serverTime` kung hindi sync ang clock).
 
 **Reconnect:** ulitin ang `join_room` gamit ang parehong `userId` at `roomId`. Kung host ka, may 15 segundo bago ilipat ang host sa iba. Naglalaho ang empty room pagkalipas ng 60 segundo.
 

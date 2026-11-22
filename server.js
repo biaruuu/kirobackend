@@ -76,6 +76,7 @@ function playbackSnapshot(room, by) {
     position: currentPosition(room),
     rate: p.rate,
     video: room.video,
+    settings: room.settings,
     by: by || null,
     serverTime: now(),
   };
@@ -121,6 +122,18 @@ function cleanNumber(v, min, max, fallback) {
   return Math.min(max, Math.max(min, n));
 }
 
+/** What the host is using (source, audio, subtitle, fullscreen, speed): guests copy it. */
+function cleanSettings(v) {
+  const o = v && typeof v === "object" && !Array.isArray(v) ? v : {};
+  return {
+    provider: cleanString(o.provider, 80),
+    audio: cleanString(o.audio, 20),
+    sub: cleanString(o.sub, 20),
+    fullscreen: o.fullscreen === true,
+    speed: cleanNumber(o.speed, 0.25, 4, 1),
+  };
+}
+
 function cleanVideo(v) {
   if (!v || typeof v !== "object") return null;
   const url = cleanString(v.url, 2048);
@@ -145,6 +158,7 @@ function createRoom(host) {
     hostId: host.userId,
     members: new Map([[host.userId, host]]),
     video: null,
+    settings: cleanSettings(null),
     playback: { playing: false, position: 0, rate: 1, updatedAt: now() },
     cleanupTimer: null,
     hostTimer: null,
@@ -240,7 +254,7 @@ function joinedPayload(room, member) {
 }
 
 // ---------------------------------------------------------- msg handlers ---
-const HOST_ONLY = new Set(["play", "pause", "seek", "rate", "change_video", "transfer_host", "kick"]);
+const HOST_ONLY = new Set(["play", "pause", "seek", "rate", "change_video", "host_settings", "transfer_host", "kick"]);
 
 function handleMessage(ws, msg) {
   const type = msg && msg.type;
@@ -346,6 +360,15 @@ function handleMessage(ws, msg) {
         ...playbackSnapshot(room, member.userId),
         action: "change_video",
       });
+    }
+    case "host_settings": {
+      room.settings = cleanSettings(msg.settings);
+      return broadcast(
+        room,
+        "state",
+        { ...playbackSnapshot(room, member.userId), action: "settings" },
+        member.userId
+      );
     }
     case "host_heartbeat": {
       // optional: host reports its real position so drift never builds up
