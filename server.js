@@ -131,6 +131,11 @@ function cleanSettings(v) {
     sub: cleanString(o.sub, 20),
     fullscreen: o.fullscreen === true,
     speed: cleanNumber(o.speed, 0.25, 4, 1),
+    // subtitle look: font name and indexes into the app's size / background / edge lists (-1 = not set)
+    subFont: cleanString(o.subFont, 40),
+    subSize: Math.round(cleanNumber(o.subSize, -1, 9, -1)),
+    subBg: Math.round(cleanNumber(o.subBg, -1, 9, -1)),
+    subEdge: Math.round(cleanNumber(o.subEdge, -1, 9, -1)),
   };
 }
 

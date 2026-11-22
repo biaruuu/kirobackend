@@ -43,7 +43,7 @@ Free Render plan natutulog kapag walang traffic, kaya may delay sa unang connect
 | `play` / `pause` / `seek` | `time` (seconds) | host |
 | `rate` | `rate` (0.25 - 4) | host |
 | `change_video` | `video{url,title,episode}`, `time?`, `autoplay?` | host |
-| `host_settings` | `settings{provider,audio,sub,fullscreen,speed}` (kini-copy ng guests) | host |
+| `host_settings` | `settings{provider,audio,sub,fullscreen,speed,subFont,subSize,subBg,subEdge}` (kini-copy ng guests) | host |
 | `host_heartbeat` | `time`, `playing` (ipadala every ~5s para walang drift) | host |
 | `transfer_host` / `kick` | `userId` | host |
 

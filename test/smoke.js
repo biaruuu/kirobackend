@@ -65,12 +65,14 @@ function client() {
   assert.strictEqual(paused.position, 101);
 
   // host settings (source, subtitle, speed, fullscreen) reach guests and late joiners
-  host.send({ type: "host_settings", settings: { provider: "Anivault", audio: "English", sub: "en", fullscreen: true, speed: 1.5 } });
+  host.send({ type: "host_settings", settings: { provider: "Anivault", audio: "English", sub: "en", fullscreen: true, speed: 1.5, subFont: "Satoshi", subSize: 1, subBg: 0, subEdge: 2 } });
   const st = await guest.next("state");
   assert.strictEqual(st.action, "settings");
   assert.strictEqual(st.settings.provider, "Anivault");
   assert.strictEqual(st.settings.fullscreen, true);
   assert.strictEqual(st.settings.speed, 1.5);
+  assert.strictEqual(st.settings.subFont, "Satoshi");
+  assert.strictEqual(st.settings.subEdge, 2);
   guest.send({ type: "host_settings", settings: { provider: "Hacked" } });
   assert.strictEqual((await guest.next("error")).code, "not_host");
 
