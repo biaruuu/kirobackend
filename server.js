@@ -493,6 +493,32 @@ function handleMessage(ws, msg) {
       if (!text || text.length > VOICE_SIGNAL_MAX) return;
       return send(target.ws, "voice_signal", { from: member.userId, data });
     }
+    case "chat": {
+      // Live chat fan-out: the app also saves the message in Firestore; this only makes it arrive at once.
+      const text = cleanString(msg.text, 500);
+      const id = cleanString(msg.id, 40);
+      if (!text || !id) return;
+      return broadcast(
+        room,
+        "chat",
+        {
+          from: member.userId,
+          id,
+          name: cleanString(msg.name, 40),
+          avatar: cleanString(msg.avatar, 400),
+          decoration: cleanString(msg.decoration, 40),
+          text,
+          at: cleanNumber(msg.at, 0, 9e15, now()),
+          edited: msg.edited === true,
+        },
+        member.userId
+      );
+    }
+    case "chat_delete": {
+      const id = cleanString(msg.id, 40);
+      if (!id) return;
+      return broadcast(room, "chat_delete", { from: member.userId, id }, member.userId);
+    }
     case "speaking": {
       if (!member.voice) return;
       return broadcast(room, "speaking", { userId: member.userId, on: msg.on === true }, member.userId);

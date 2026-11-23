@@ -73,3 +73,6 @@ State ay nasa memory, kaya isang instance lang (huwag mag-scale sa maraming inst
 ### Browse mirror and idle rooms
 - `browse` (host only): `{browse: {screen, animeId, title, subtitle, poster, banner, query}}` is stored on the room, sent to everyone else as `browse`, and included in `joined` / `room_created`. Guests use it to show what the host is looking at.
 - A room is ended when every member has been offline for 10 minutes.
+
+### Live chat
+- `chat` `{id, name, avatar, decoration, text, at, edited?}` and `chat_delete` `{id}` are relayed to everyone else in the room as `chat` / `chat_delete` (with `from`). The app also stores the message in Firestore; the relay just makes it arrive immediately, and the shared `id` lets the app merge the two.
