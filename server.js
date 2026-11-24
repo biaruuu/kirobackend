@@ -202,7 +202,6 @@ function createRoom(host) {
     members: new Map([[host.userId, host]]),
     video: null,
     browse: null,
-    screen: false,
     settings: cleanSettings(null),
     playback: { playing: false, position: 0, rate: 1, updatedAt: now() },
     cleanupTimer: null,
@@ -235,7 +234,6 @@ function migrateHost(room) {
     .sort((a, b) => a.joinedAt - b.joinedAt);
   if (!candidates.length) return;
   room.hostId = candidates[0].userId;
-  if (room.screen) { room.screen = false; broadcast(room, "screen_state", { on: false, hostId: room.hostId }); }
   broadcast(room, "host_changed", { hostId: room.hostId, members: memberList(room) });
 }
 
@@ -313,13 +311,12 @@ function joinedPayload(room, member) {
     members: memberList(room),
     voice: voiceList(room),
     browse: room.browse,
-    screen: room.screen === true,
     state: playbackSnapshot(room),
   };
 }
 
 // ---------------------------------------------------------- msg handlers ---
-const HOST_ONLY = new Set(["play", "pause", "seek", "rate", "change_video", "host_settings", "transfer_host", "kick", "browse", "screen_start", "screen_stop"]);
+const HOST_ONLY = new Set(["play", "pause", "seek", "rate", "change_video", "host_settings", "transfer_host", "kick", "browse"]);
 
 function handleMessage(ws, msg) {
   const type = msg && msg.type;
@@ -430,36 +427,6 @@ function handleMessage(ws, msg) {
       room.browse = cleanBrowse(msg.browse);
       return broadcast(room, "browse", { browse: room.browse }, member.userId);
     }
-    // ---- live screen of the host (video goes phone to phone over WebRTC; the server only relays the set-up notes)
-    case "screen_start": {
-      room.screen = true;
-      return broadcast(room, "screen_state", { on: true, hostId: room.hostId });
-    }
-    case "screen_stop": {
-      room.screen = false;
-      return broadcast(room, "screen_state", { on: false, hostId: room.hostId });
-    }
-    case "screen_watch": {
-      // a guest asks the host to send the picture
-      if (!room.screen || member.userId === room.hostId) return;
-      const host = room.members.get(room.hostId);
-      if (host && host.ws) send(host.ws, "screen_watch", { from: member.userId });
-      return;
-    }
-    case "screen_signal": {
-      const target = room.members.get(cleanString(msg.to, 64));
-      if (!target || !target.ws) return;
-      // only between the host and a guest
-      if (member.userId !== room.hostId && target.userId !== room.hostId) return;
-      const data = msg.data && typeof msg.data === "object" && !Array.isArray(msg.data) ? msg.data : null;
-      if (!data) return;
-      let text = "";
-      try {
-        text = JSON.stringify(data);
-      } catch (_) {}
-      if (!text || text.length > VOICE_SIGNAL_MAX) return;
-      return send(target.ws, "screen_signal", { from: member.userId, data });
-    }
     case "host_settings": {
       room.settings = cleanSettings(msg.settings);
       return broadcast(
@@ -562,7 +529,6 @@ function handleMessage(ws, msg) {
       const target = room.members.get(cleanString(msg.userId, 64));
       if (!target || !target.ws) return sendError(ws, "bad_target", "member not found or offline");
       room.hostId = target.userId;
-      if (room.screen) { room.screen = false; broadcast(room, "screen_state", { on: false, hostId: room.hostId }); }
       return broadcast(room, "host_changed", { hostId: room.hostId, members: memberList(room) });
     }
     case "kick": {
@@ -676,7 +642,7 @@ wss.on("connection", (ws) => {
     ws.tokens = Math.min(RATE_LIMIT_PER_SEC, ws.tokens + ((t - ws.lastRefill) / 1000) * RATE_LIMIT_PER_SEC);
     ws.lastRefill = t;
     const type = msg && msg.type;
-    const cost = type === "voice_signal" || type === "screen_signal" ? 0.2 : type === "speaking" ? 0.5 : 1;
+    const cost = type === "voice_signal" ? 0.2 : type === "speaking" ? 0.5 : 1;
     if (ws.tokens < cost) return sendError(ws, "rate_limited", "slow down");
     ws.tokens -= cost;
     try {

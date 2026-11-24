@@ -49,13 +49,10 @@ Free Render plan natutulog kapag walang traffic, kaya may delay sa unang connect
 | `voice_join` | `muted?`, `deafened?` | lahat |
 | `voice_leave` | | lahat |
 | `voice_mute` | `muted`, `deafened` | nasa voice |
-| `screen_start` / `screen_stop` | (host only) the host starts or stops sharing its screen; everyone gets `screen_state{on}` | host |
-| `screen_watch` | (guest) ask the host to send the live screen; the host gets `screen_watch{from}` | guest |
-| `screen_signal` | `to`, `data{type: offer/answer/ice, ...}` (host <-> guest WebRTC set-up; the video goes phone to phone) | host / guest |
 | `voice_signal` | `to`, `data{type: offer/answer/ice, ...}` (relay lang; ang audio ay phone-to-phone WebRTC) | nasa voice |
 | `speaking` | `on: bool` | nasa voice |
 
-**Server > Client**: `connected`, `room_created`, `joined`, `state`, `member_joined`, `member_left`, `member_online`, `member_offline`, `host_changed`, `chat`, `buffering`, `kicked`, `replaced`, `left`, `pong`, `voice_state{members:[{userId,muted,deafened}]}`, `voice_signal{from,data}`, `speaking{userId,on}`, `screen_state{on,hostId}`, `screen_watch{from}`, `screen_signal{from,data}`, `error{code,message}`
+**Server > Client**: `connected`, `room_created`, `joined`, `state`, `member_joined`, `member_left`, `member_online`, `member_offline`, `host_changed`, `chat`, `buffering`, `kicked`, `replaced`, `left`, `pong`, `voice_state{members:[{userId,muted,deafened}]}`, `voice_signal{from,data}`, `speaking{userId,on}`, `error{code,message}`
 
 `state` = `{ playing, position, rate, video, settings, action, by, serverTime }`. Ang `position` ay computed na ng server sa oras na ipinadala. Para sa latency, i-apply ng client: `position + (Date.now() - serverTime)/1000 * rate` kung `playing` (gamitin ang offset mula sa `connected.serverTime` / `pong.serverTime` kung hindi sync ang clock).
 
@@ -81,4 +78,4 @@ State ay nasa memory, kaya isang instance lang (huwag mag-scale sa maraming inst
 - `chat` `{id, name, avatar, decoration, text, at, edited?}` and `chat_delete` `{id}` are relayed to everyone else in the room as `chat` / `chat_delete` (with `from`). The app also stores the message in Firestore; the relay just makes it arrive immediately, and the shared `id` lets the app merge the two.
 
 
-- `host_settings.settings.src` is a small JSON note of the exact stream the host plays (address, headers, captions), so guests play the very same one even if their own lookup missed it. `joined` includes `screen` (true while the host shares its screen).
+- `host_settings.settings.src` is a small JSON note of the exact stream the host plays (address, headers, captions), so guests play the very same one even if their own lookup missed it.
