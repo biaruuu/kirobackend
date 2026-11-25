@@ -15,6 +15,81 @@ const { WebSocketServer, WebSocket } = require("ws");
 // ---------------------------------------------------------------- config ---
 const PORT = parseInt(process.env.PORT || "8080", 10);
 const WS_TOKEN = process.env.WS_TOKEN || ""; // optional shared secret (?token=...)
+
+// ------------------------------------------------------------- security ---
+// The app signs every connection with an HMAC of the current time. Set APP_SECRET (same value as the app's
+// KIRO_WS_SECRET build secret) to check signatures; add REQUIRE_SIG=1 to refuse unsigned (old) apps too.
+const APP_SECRET = process.env.APP_SECRET || "";
+const REQUIRE_SIG = process.env.REQUIRE_SIG === "1";
+const SIG_WINDOW_MS = 2 * 60 * 1000;
+const MAX_CONN_PER_IP = Number(process.env.MAX_CONN_PER_IP || 8);
+const CONNECT_PER_MIN = Number(process.env.CONNECT_PER_MIN || 30);
+const BAN_MS = 10 * 60 * 1000;
+
+const ipHits = new Map(); // "bucket|ip" -> { n, reset }
+const ipBans = new Map(); // ip -> until
+const ipConns = new Map(); // ip -> open sockets
+
+/** The caller's address as seen by the platform's proxy (the last hop is the one we can trust). */
+function clientIp(req) {
+  const xff = String(req.headers["x-forwarded-for"] || "");
+  const last = xff.split(",").pop().trim();
+  return last || req.socket.remoteAddress || "unknown";
+}
+
+function banned(ip) {
+  const until = ipBans.get(ip);
+  if (!until) return false;
+  if (until < Date.now()) {
+    ipBans.delete(ip);
+    return false;
+  }
+  return true;
+}
+
+/** Counts a hit in a fixed window; returns false when the caller is over the limit (and bans repeat offenders). */
+function hit(ip, bucket, limit, windowMs) {
+  const key = bucket + "|" + ip;
+  const t = Date.now();
+  let h = ipHits.get(key);
+  if (!h || h.reset < t) {
+    h = { n: 0, reset: t + windowMs, strikes: h ? h.strikes || 0 : 0 };
+    ipHits.set(key, h);
+  }
+  h.n++;
+  if (h.n <= limit) return true;
+  if (h.n === limit + 1) {
+    h.strikes = (h.strikes || 0) + 1;
+    if (h.strikes >= 3) ipBans.set(ip, t + BAN_MS);
+  }
+  return false;
+}
+
+setInterval(() => {
+  const t = Date.now();
+  for (const [k, h] of ipHits) if (h.reset < t - 10 * 60 * 1000) ipHits.delete(k);
+  for (const [k, u] of ipBans) if (u < t) ipBans.delete(k);
+}, 60 * 1000).unref();
+
+function sigOk(ts, sig) {
+  if (!APP_SECRET) return true;
+  if (!ts || !sig) return !REQUIRE_SIG;
+  const n = Number(ts);
+  if (!Number.isFinite(n) || Math.abs(Date.now() - n) > SIG_WINDOW_MS) return false;
+  const want = crypto.createHmac("sha256", APP_SECRET).update(String(ts)).digest("hex");
+  const a = Buffer.from(want);
+  const b = Buffer.from(String(sig));
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
+
+const SECURITY_HEADERS = {
+  "X-Content-Type-Options": "nosniff",
+  "X-Frame-Options": "DENY",
+  "Referrer-Policy": "no-referrer",
+  "Content-Security-Policy": "default-src 'none'; frame-ancestors 'none'",
+  "Strict-Transport-Security": "max-age=31536000; includeSubDomains",
+  "Cache-Control": "no-store",
+};
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "")
   .split(",")
   .map((s) => s.trim())
@@ -325,6 +400,7 @@ function handleMessage(ws, msg) {
   if (type === "ping") return send(ws, "pong", { t: msg.t ?? null, serverTime: now() });
 
   if (type === "create_room") {
+    if (!hit(ws.ip || "unknown", "create", 10, 10 * 60 * 1000)) return sendError(ws, "rate_limited", "too many rooms created, try later");
     if (ws.roomId) return sendError(ws, "already_in_room", "leave current room first");
     const userId = cleanString(msg.userId, 64) || crypto.randomUUID();
     const name = cleanString(msg.name, NAME_MAX_LEN) || "Guest";
@@ -340,7 +416,14 @@ function handleMessage(ws, msg) {
     if (ws.roomId) return sendError(ws, "already_in_room", "leave current room first");
     const roomId = cleanString(msg.roomId, 12).toUpperCase();
     const room = rooms.get(roomId);
-    if (!room) return sendError(ws, "room_not_found", "Room not found");
+    if (!room) {
+      // Guessing room codes: a handful of misses is fine, more than that and the caller is cut off.
+      if (!hit(ws.ip || "unknown", "joinmiss", 8, 5 * 60 * 1000)) {
+        sendError(ws, "rate_limited", "too many wrong codes");
+        return ws.close(4008, "too many wrong codes");
+      }
+      return sendError(ws, "room_not_found", "Room not found");
+    }
     const userId = cleanString(msg.userId, 64) || crypto.randomUUID();
     const name = cleanString(msg.name, NAME_MAX_LEN) || "Guest";
 
@@ -552,49 +635,36 @@ function json(res, status, body) {
   res.writeHead(status, {
     "Content-Type": "application/json",
     "Content-Length": Buffer.byteLength(data),
-    "Access-Control-Allow-Origin": "*",
-    "Cache-Control": "no-store",
+    ...SECURITY_HEADERS,
   });
   res.end(data);
 }
 
 const server = http.createServer((req, res) => {
-  const url = new URL(req.url, "http://localhost");
-
-  if (req.method === "OPTIONS") {
-    res.writeHead(204, {
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "GET, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type",
-    });
+  const ip = clientIp(req);
+  res.setHeader("Server", "kiro");
+  for (const [k, v] of Object.entries(SECURITY_HEADERS)) res.setHeader(k, v);
+  if (banned(ip)) {
+    res.writeHead(429, { "Retry-After": "600" });
     return res.end();
   }
-
-  if (req.method === "GET" && (url.pathname === "/" || url.pathname === "/health")) {
-    return json(res, 200, {
-      ok: true,
-      service: "kiro-watchparty",
-      rooms: rooms.size,
-      uptime: Math.round(process.uptime()),
-    });
+  // Nothing here is meant for browsers: no CORS, so a web page cannot read it.
+  if (req.method === "OPTIONS") {
+    res.writeHead(204);
+    return res.end();
   }
+  if (!hit(ip, "http", 60, 60 * 1000)) return json(res, 429, { error: "slow_down" });
 
-  // lets the app check a room code before opening the socket
-  const m = url.pathname.match(/^\/rooms\/([A-Za-z0-9]{1,12})$/);
-  if (req.method === "GET" && m) {
-    const room = rooms.get(m[1].toUpperCase());
-    if (!room) return json(res, 404, { exists: false });
-    return json(res, 200, {
-      exists: true,
-      roomId: room.id,
-      members: room.members.size,
-      full: room.members.size >= MAX_ROOM_SIZE,
-      video: room.video ? { title: room.video.title, episode: room.video.episode } : null,
-    });
-  }
+  const path = (req.url || "/").split("?")[0];
+  // The only public page is a bare "alive" check (for uptime pingers); it reveals nothing about rooms or load.
+  if (req.method === "GET" && (path === "/" || path === "/health")) return json(res, 200, { ok: true });
 
+  // Anything else probes for something that is not there: count it, so scanners get blocked.
+  hit(ip, "probe", 10, 5 * 60 * 1000);
   json(res, 404, { error: "not_found" });
 });
+server.headersTimeout = 15000;
+server.requestTimeout = 20000;
 
 // ------------------------------------------------------------- websocket ---
 const wss = new WebSocketServer({
@@ -602,19 +672,29 @@ const wss = new WebSocketServer({
   path: "/ws",
   maxPayload: MAX_MESSAGE_BYTES,
   verifyClient: (info, done) => {
-    if (ALLOWED_ORIGINS.length) {
-      const origin = info.origin;
-      if (origin && !ALLOWED_ORIGINS.includes(origin)) return done(false, 403, "origin not allowed");
-    }
-    if (WS_TOKEN) {
-      const token = new URL(info.req.url, "http://localhost").searchParams.get("token");
-      if (token !== WS_TOKEN) return done(false, 401, "unauthorized");
-    }
+    const ip = clientIp(info.req);
+    if (banned(ip)) return done(false, 429, "try later");
+    if (!hit(ip, "connect", CONNECT_PER_MIN, 60 * 1000)) return done(false, 429, "too many connections");
+    if ((ipConns.get(ip) || 0) >= MAX_CONN_PER_IP) return done(false, 429, "too many connections");
+    // The app is not a web page: a browser always sends an Origin, so only listed origins may have one.
+    const origin = info.origin;
+    if (origin && !ALLOWED_ORIGINS.includes(origin)) return done(false, 403, "origin not allowed");
+    const q = new URL(info.req.url, "http://localhost").searchParams;
+    if (WS_TOKEN && q.get("token") !== WS_TOKEN) return done(false, 401, "unauthorized");
+    if (!sigOk(q.get("ts"), q.get("sig"))) return done(false, 401, "unauthorized");
     done(true);
   },
 });
 
-wss.on("connection", (ws) => {
+wss.on("connection", (ws, req) => {
+  const ip = clientIp(req);
+  ws.ip = ip;
+  ipConns.set(ip, (ipConns.get(ip) || 0) + 1);
+  ws.once("close", () => {
+    const n = (ipConns.get(ip) || 1) - 1;
+    if (n <= 0) ipConns.delete(ip);
+    else ipConns.set(ip, n);
+  });
   ws.isAlive = true;
   ws.roomId = null;
   ws.userId = null;
@@ -634,6 +714,7 @@ wss.on("connection", (ws) => {
     try {
       msg = JSON.parse(raw.toString());
     } catch (_) {
+      if (!hit(ws.ip, "badmsg", 20, 60 * 1000)) ws.terminate();
       return sendError(ws, "bad_json", "invalid JSON");
     }
 

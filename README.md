@@ -79,3 +79,12 @@ State ay nasa memory, kaya isang instance lang (huwag mag-scale sa maraming inst
 
 
 - `host_settings.settings.src` is a small JSON note of the exact stream the host plays (address, headers, captions), so guests play the very same one even if their own lookup missed it.
+
+
+## Security (anti-scraping / abuse)
+
+- **No CORS, no public data.** Browsers cannot read the API; the only public page is `/health` (`{"ok":true}`, no room count or uptime). The old `/rooms/:code` lookup was removed so room codes cannot be probed.
+- **Browsers are refused on the socket.** A connection that carries an `Origin` header (every browser sends one) is rejected unless the origin is listed in `ALLOWED_ORIGINS`. The Android app sends none.
+- **Signed connections.** Set `APP_SECRET` (the same value as the app's `KIRO_WS_SECRET` build secret). The app sends `ts` and `sig = HMAC-SHA256(APP_SECRET, ts)` and the server accepts it within 2 minutes. Wrong signature = refused. Add `REQUIRE_SIG=1` once most people updated, to also refuse unsigned (older) apps.
+- **Per-IP limits and bans.** At most `MAX_CONN_PER_IP` (8) sockets and `CONNECT_PER_MIN` (30) new connections per IP, 60 HTTP requests per minute, 10 rooms created per 10 minutes, 8 wrong room codes per 5 minutes. Repeat offenders are blocked for 10 minutes.
+- Security headers on every response (`nosniff`, `no-store`, `X-Frame-Options`, HSTS, `Content-Security-Policy: default-src 'none'`), request time limits against slow-loris.
