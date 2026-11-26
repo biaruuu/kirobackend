@@ -315,6 +315,116 @@ function joinedPayload(room, member) {
   };
 }
 
+// ------------------------------------------------- live announcements ---
+// The developer sends one message to every phone that is open, as a short fading prompt with a
+// verified name. Phones answer with a like or a dislike; the totals are pushed back to everyone.
+const ADMIN_TOKEN = process.env.ADMIN_TOKEN || ""; // secret that lets the developer announce; empty = announcing is off
+const ANNOUNCE_LATE_JOIN_MS = 90_000; // a phone that connects this soon after still sees it
+const ANNOUNCE_MIN_MS = 5_000;
+const ANNOUNCE_MAX_MS = 30_000;
+const ANNOUNCE_TEXT_MAX = 240;
+const COUNTS_PUSH_MS = 400; // reactions are batched so a busy announcement does not flood every phone
+
+/** @type {Set<WebSocket>} phones that asked for announcements (the app, while it is open) */
+const globals = new Set();
+/** @type {{id:string,text:string,username:string,avatar:string,createdAt:number,durationMs:number,votes:Map<string,string>}|null} */
+let announcement = null;
+let countsDirty = false;
+
+function tokenOk(given) {
+  if (!ADMIN_TOKEN || typeof given !== "string") return false;
+  const a = crypto.createHash("sha256").update(given).digest();
+  const b = crypto.createHash("sha256").update(ADMIN_TOKEN).digest();
+  return crypto.timingSafeEqual(a, b);
+}
+
+function tally() {
+  let likes = 0;
+  let dislikes = 0;
+  if (announcement) for (const v of announcement.votes.values()) v === "like" ? likes++ : dislikes++;
+  return { likes, dislikes };
+}
+
+function announcementPayload() {
+  const t = now();
+  return {
+    id: announcement.id,
+    text: announcement.text,
+    username: announcement.username,
+    avatar: announcement.avatar,
+    verified: true,
+    createdAt: announcement.createdAt,
+    durationMs: announcement.durationMs,
+    remainingMs: Math.max(0, announcement.createdAt + announcement.durationMs - t),
+    online: globals.size,
+    ...tally(),
+  };
+}
+
+function broadcastGlobal(type, payload) {
+  const data = JSON.stringify({ type, ...payload });
+  for (const ws of globals) if (ws.readyState === WebSocket.OPEN) ws.send(data);
+}
+
+setInterval(() => {
+  if (!countsDirty || !announcement) return;
+  countsDirty = false;
+  broadcastGlobal("announcement_counts", { id: announcement.id, online: globals.size, ...tally() });
+}, COUNTS_PUSH_MS).unref();
+
+function handleGlobal(ws, type, msg) {
+  if (type === "global_join") {
+    globals.add(ws);
+    ws.global = true;
+    send(ws, "global_ready", { online: globals.size });
+    if (announcement && now() - announcement.createdAt < Math.min(ANNOUNCE_LATE_JOIN_MS, announcement.durationMs)) {
+      send(ws, "announcement", announcementPayload());
+    }
+    countsDirty = true;
+    return true;
+  }
+  if (type === "global_leave") {
+    globals.delete(ws);
+    ws.global = false;
+    return true;
+  }
+  if (type === "announce") {
+    if (!ADMIN_TOKEN) return sendError(ws, "announce_disabled", "ADMIN_TOKEN is not set on the server"), true;
+    if (!tokenOk(msg.token)) return sendError(ws, "forbidden", "wrong admin token"), true;
+    const text = cleanString(msg.text, ANNOUNCE_TEXT_MAX);
+    if (!text) return sendError(ws, "bad_message", "empty announcement"), true;
+    const avatar = cleanString(msg.avatar, 400);
+    announcement = {
+      id: crypto.randomUUID(),
+      text,
+      username: cleanString(msg.username, NAME_MAX_LEN) || "Kiro",
+      avatar: /^https?:\/\//.test(avatar) ? avatar : "",
+      createdAt: now(),
+      durationMs: Math.min(ANNOUNCE_MAX_MS, Math.max(ANNOUNCE_MIN_MS, parseInt(msg.durationMs, 10) || 12_000)),
+      votes: new Map(),
+    };
+    const payload = announcementPayload();
+    broadcastGlobal("announcement", payload);
+    send(ws, "announce_ok", { id: announcement.id, delivered: globals.size });
+    return true;
+  }
+  if (type === "announce_clear") {
+    if (!tokenOk(msg.token)) return sendError(ws, "forbidden", "wrong admin token"), true;
+    if (announcement) broadcastGlobal("announcement_end", { id: announcement.id });
+    announcement = null;
+    return true;
+  }
+  if (type === "react") {
+    const voter = cleanString(msg.voter, 64);
+    if (!announcement || !voter || msg.id !== announcement.id) return true;
+    if (msg.choice === "like" || msg.choice === "dislike") announcement.votes.set(voter, msg.choice);
+    else announcement.votes.delete(voter);
+    countsDirty = true;
+    return true;
+  }
+  return false;
+}
+
 // ---------------------------------------------------------- msg handlers ---
 const HOST_ONLY = new Set(["play", "pause", "seek", "rate", "change_video", "host_settings", "transfer_host", "kick", "browse"]);
 
@@ -323,6 +433,8 @@ function handleMessage(ws, msg) {
   if (typeof type !== "string") return sendError(ws, "bad_message", "missing type");
 
   if (type === "ping") return send(ws, "pong", { t: msg.t ?? null, serverTime: now() });
+
+  if (handleGlobal(ws, type, msg)) return;
 
   if (type === "create_room") {
     if (ws.roomId) return sendError(ws, "already_in_room", "leave current room first");
@@ -653,7 +765,10 @@ wss.on("connection", (ws) => {
     }
   });
 
-  ws.on("close", () => handleDisconnect(ws));
+  ws.on("close", () => {
+    globals.delete(ws);
+    handleDisconnect(ws);
+  });
   ws.on("error", (err) => console.error("socket error:", err.message));
 });
 
@@ -683,4 +798,4 @@ if (require.main === module) {
   process.on("SIGINT", shutdown);
 }
 
-module.exports = { server, wss, rooms };
+module.exports = { server, wss, rooms, globals };

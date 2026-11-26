@@ -18,6 +18,7 @@ Free Render plan natutulog kapag walang traffic, kaya may delay sa unang connect
 | Name | Gamit |
 |---|---|
 | `PORT` | default 8080 (Render ang nagse-set) |
+| `ADMIN_TOKEN` | lihim na susi ng developer para mag-announce (sa app: Admin > Live announcement). Walang laman = patay ang announce |
 | `WS_TOKEN` | kung nakalagay, connect gamit `/ws?token=...` |
 | `ALLOWED_ORIGINS` | comma-separated web origins; native app walang Origin kaya pasok pa rin |
 | `MAX_ROOM_SIZE` | default 50 |
