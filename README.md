@@ -80,3 +80,11 @@ State ay nasa memory, kaya isang instance lang (huwag mag-scale sa maraming inst
 
 
 - `host_settings.settings.src` is a small JSON note of the exact stream the host plays (address, headers, captions), so guests play the very same one even if their own lookup missed it.
+
+## Community chat (sa parehong `/ws`)
+
+Pagkatapos ng `global_join`, ang app ay nagpapadala ng `chat_join {uid,name,avatar,decoration,nameFont}`.
+- `chat_open {open}` — kung bukas ang Community screen, natatanggap ang lahat ng `chat_msg` at `chat_typing`.
+- `chat_send {id,text,image?,token?}` — `image` ay maliit na `data:image/jpeg;base64,…` (≤ ~175 KB). Ang `token` (ADMIN_TOKEN) ang nagbibigay ng `dev` at ng karapatang mag-`@everyone`.
+- Kung hindi nakabukas ang chat, `chat_mention` lang ang natatanggap (kapag na-tag, o `@everyone` mula sa dev).
+- `chat_typing`, `chat_delete {id,token}` (dev lang) → `chat_deleted`.

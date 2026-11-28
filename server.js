@@ -20,7 +20,8 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "")
   .map((s) => s.trim())
   .filter(Boolean); // empty = allow all. Native apps send no Origin header anyway.
 const MAX_ROOM_SIZE = parseInt(process.env.MAX_ROOM_SIZE || "50", 10);
-const MAX_MESSAGE_BYTES = 24 * 1024; // video set-up notes (SDP) and the host's stream note are bigger than chat lines
+const SMALL_MESSAGE_BYTES = 24 * 1024; // video set-up notes (SDP) and the host's stream note are bigger than chat lines
+const MAX_MESSAGE_BYTES = 320 * 1024; // only a community chat photo (a small JPEG) is allowed to be this large
 const HEARTBEAT_MS = 30_000;
 const EMPTY_ROOM_TTL_MS = 10 * 60_000; // end the room after everyone has been offline this long
 const VOICE_SIGNAL_MAX = 16000;
@@ -29,6 +30,9 @@ const HOST_GRACE_MS = 15_000; // wait before migrating host after disconnect
 const RATE_LIMIT_PER_SEC = 20;
 const CHAT_MAX_LEN = 500;
 const NAME_MAX_LEN = 32;
+const COMMUNITY_TEXT_MAX = 1000;
+const COMMUNITY_IMAGE_MAX = 240_000; // characters of the base64 photo (about 175 KB)
+const COMMUNITY_MIN_GAP_MS = 600;
 const CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
 
 // ----------------------------------------------------------------- state ---
@@ -372,7 +376,103 @@ setInterval(() => {
   broadcastGlobal("announcement_counts", { id: announcement.id, online: globals.size, ...tally() });
 }, COUNTS_PUSH_MS).unref();
 
+// ------------------------------------------------------------- community ---
+/** Keeps line breaks (unlike cleanString) for chat text. */
+function cleanChat(v, max) {
+  if (typeof v !== "string") return "";
+  return v.replace(/[\u0000-\u0009\u000b-\u001f\u007f]/g, "").trim().slice(0, max);
+}
+
+function lowerName(ws) {
+  return ws.chat ? ws.chat.name.toLowerCase() : "";
+}
+
+function handleCommunity(ws, type, msg) {
+  if (type === "chat_join") {
+    const uid = cleanString(msg.uid, 64);
+    const name = cleanString(msg.name, NAME_MAX_LEN);
+    if (!uid || !name) return true;
+    ws.chat = {
+      uid,
+      name,
+      avatar: cleanString(msg.avatar, 400),
+      decoration: cleanString(msg.decoration, 40),
+      nameFont: cleanString(msg.nameFont, 40),
+    };
+    ws.chatOpen = false;
+    ws.lastChat = 0;
+    globals.add(ws);
+    ws.global = true;
+    return true;
+  }
+  if (!ws.chat) return type.startsWith("chat_");
+  if (type === "chat_open") {
+    ws.chatOpen = !!msg.open;
+    return true;
+  }
+  if (type === "chat_typing") {
+    const data = JSON.stringify({ type: "chat_typing", uid: ws.chat.uid, name: ws.chat.name });
+    for (const o of globals) if (o !== ws && o.chatOpen && o.readyState === WebSocket.OPEN) o.send(data);
+    return true;
+  }
+  if (type === "chat_send") {
+    const t = now();
+    if (t - ws.lastChat < COMMUNITY_MIN_GAP_MS) return sendError(ws, "rate_limited", "slow down"), true;
+    const text = cleanChat(msg.text, COMMUNITY_TEXT_MAX);
+    let image = "";
+    if (typeof msg.image === "string" && msg.image) {
+      if (!msg.image.startsWith("data:image/jpeg;base64,") || msg.image.length > COMMUNITY_IMAGE_MAX) {
+        return sendError(ws, "bad_message", "photo too large"), true;
+      }
+      image = msg.image;
+    }
+    if (!text && !image) return true;
+    ws.lastChat = t;
+    const dev = tokenOk(msg.token);
+    const everyone = dev && /(^|\s)@everyone\b/i.test(text);
+    const wanted = new Set();
+    for (const m of text.matchAll(/@([A-Za-z0-9_.]{3,20})/g)) wanted.add(m[1].toLowerCase());
+    const mentions = [];
+    for (const o of globals) {
+      const n = lowerName(o);
+      if (n && wanted.has(n) && !mentions.includes(o.chat.name)) mentions.push(o.chat.name);
+    }
+    const out = {
+      id: cleanString(msg.id, 40) || crypto.randomUUID(),
+      uid: ws.chat.uid,
+      name: ws.chat.name,
+      avatar: ws.chat.avatar,
+      decoration: ws.chat.decoration,
+      nameFont: ws.chat.nameFont,
+      text,
+      image,
+      at: t,
+      dev,
+      everyone,
+      mentions,
+    };
+    const full = JSON.stringify({ type: "chat_msg", ...out });
+    const pop = JSON.stringify({ type: "chat_mention", ...out, image: "", hasImage: !!image });
+    for (const o of globals) {
+      if (o === ws || o.readyState !== WebSocket.OPEN) continue;
+      if (o.chatOpen) o.send(full);
+      else if (everyone || (o.chat && mentions.includes(o.chat.name))) o.send(pop);
+    }
+    send(ws, "chat_ack", { id: out.id, at: t, dev, everyone, mentions });
+    return true;
+  }
+  if (type === "chat_delete") {
+    // only the developer removes other people's messages; everyone sees it vanish at once
+    if (!tokenOk(msg.token)) return sendError(ws, "forbidden", "wrong admin token"), true;
+    const id = cleanString(msg.id, 40);
+    if (id) broadcastGlobal("chat_deleted", { id });
+    return true;
+  }
+  return false;
+}
+
 function handleGlobal(ws, type, msg) {
+  if (type.startsWith("chat_")) return handleCommunity(ws, type, msg);
   if (type === "global_join") {
     globals.add(ws);
     ws.global = true;
@@ -754,6 +854,7 @@ wss.on("connection", (ws) => {
     ws.tokens = Math.min(RATE_LIMIT_PER_SEC, ws.tokens + ((t - ws.lastRefill) / 1000) * RATE_LIMIT_PER_SEC);
     ws.lastRefill = t;
     const type = msg && msg.type;
+    if (raw.length > SMALL_MESSAGE_BYTES && type !== "chat_send") return sendError(ws, "bad_message", "message too large");
     const cost = type === "voice_signal" ? 0.2 : type === "speaking" ? 0.5 : 1;
     if (ws.tokens < cost) return sendError(ws, "rate_limited", "slow down");
     ws.tokens -= cost;
